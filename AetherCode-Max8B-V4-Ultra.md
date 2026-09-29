@@ -1,15 +1,26 @@
-To transform this from a pure model architecture into a production-grade, local IDE/Agent engine, five critical production features were missing from your setup:
-* **Fill-In-The-Middle (FIM) Special Token Architecture:** Essential for IDE inline autocomplete (Cursor, VS Code, Continue.dev) to work in the middle of code blocks.
-* **Embedded GGUF Tool-Calling & JSON-Schema Chat Template:** Native function calling and structured JSON output handling for local agent frameworks.
-* **FlashAttention-3 Hardware Alignment ($d_{\text{head}} = 128$):** Fixed key/value head dimensions so `llama-server --flash-attn` uses fast CUDA/Metal matrix kernels.
-* **Embedded RoPE Scaling Metadata (YaRN):** Native GGUF metadata for smooth context scaling beyond 262K up to 1,000,000 tokens without manual CLI flags.
-* **Multi-Slot Parallel Serving Configuration:** Optimization flags enabling concurrent IDE background indexing alongside active chat sessions.
+# Master Blueprint: AetherCode-Max8B (42B Production Edition)
+
+The **AetherCode-Max8B (42B Production Edition)** scales total parameter capacity down from 48B to 42.0B Total Parameters while maintaining 8.0B Active Parameters per token pass. This structural shift frees up memory to dedicate 7.00 GB of RAM for OS, compiler, and IDE overhead on a 32 GB system, while remaining natively compatible with upstream `llama.cpp` and `Ollama` without custom kernels.
 
 ---
 
-# Complete Unified Blueprint: AetherCode-Max8B (Production Edition)
+## 1. System Memory Allocation Budget (32 GB RAM Ceiling)
 
-## 1. Model Architecture & Vocabulary Extensions
+All model weights strictly use Q4_K_M + iMatrix calibration (4-bit block quantization with 6-bit scale factors). Low-precision Q3 quant formats are completely excluded.
+
+| Memory Component | Technical Specification | Memory Footprint |
+|---|---|---|
+| **Model Base Weights (42B Total / 8.0B Active)** | Q4_K_M + iMatrix (60 Layers, 36 Routed Experts) | 21.71 GB |
+| **Embedded MTP Draft Tensors** | 2-Step Speculative Prediction Heads (inside GGUF) | 1.05 GB |
+| **GDN State + QSA Context Cache** | 262K Token Window (q4_0 Quantized KV Cache) | 0.85 GB |
+| **N-Gram Offloaded Lookup Table** | 20M Bigram/Trigram Entries (mmap System RAM Cache) | 0.85 GB |
+| **System & OS Overhead Allocation** | OS, Compilers, Clangd, IDEs, Web Browsers | 7.00 GB |
+| **Total Memory Usage** | Target Budget Ceiling: 32.00 GB | 31.46 GB |
+| **Free RAM Cushion** | Buffer to prevent OS memory thrashing | 0.54 GB |
+
+---
+
+## 2. Updated Model Topology
 
 ```
                            [ 152K Vocab BPE Tokenizer + Native FIM + Tool Tokens ]
@@ -27,52 +38,62 @@ To transform this from a pure model architecture into a production-grade, local 
                                                      │
                                                      ▼
                                    [ Ultra-Sparse MoE Routing Layer ]
-                                 (48 Fine-Grained + 2 Shared Experts)
+                                 (36 Fine-Grained + 2 Shared Experts)
                                                      │
                                                      ▼
                                  [ Active Compute: 8.0B Params / Token ]
+                                 (8 Routed Experts + 2 Shared Experts Active)
                                                      │
                                                      ▼
                                  [ Embedded 2-Step MTP Draft Heads ]
 ```
 
-### FIM Special Tokens (IDE Infilling Protocol)
-* `<|fim_prefix|>`: Marks code above the cursor
-* `<|fim_suffix|>`: Marks code below the cursor
-* `<|fim_middle|>`: Generates the code between prefix and suffix
-* `<|repo_name|>`: Multi-file repository context tagging
-* `<|file_sep|>`: File boundary demarcation for repository indexing
+---
+
+## 3. Core Architectural Pillar Specifications
+
+### A. MoE Expert Sizing (36 Routed / 8.0B Active)
+* **Total Experts:** 36 fine-grained routed experts + 2 permanently active shared experts per layer.
+* **Active Routing:** 8 routed experts activated per token via auxiliary-loss-free softmax gating + 2 shared experts = 8.0B active parameters engaged per forward pass.
+* **Specialization Density:** Trimming routed experts from 48 to 36 saves ~3.1 GB of weight RAM without altering reasoning power per token pass.
+
+### B. Hybrid GDN + QSA Attention Layering ($d_{\text{head}} = 128$)
+* **75% Gated DeltaNet (GDN):** Three out of every four layers use linear recurrent Gated DeltaNet state blocks, compressing historical context into a fixed-size memory vector.
+* **25% Qwen Sparse Attention (QSA):** The remaining layers utilize QSA with a micro-block retrieval indexer. Head dimension is locked to $d_{\text{head}} = 128$ for hardware alignment with FlashAttention-3 kernels.
+
+### C. Multi-Token Prediction (MTP) Speculative Heads
+* **Embedded Draft Heads:** Houses 2-step speculative prediction heads directly inside the base GGUF file.
+* **Zero Draft Model Overhead:** `llama.cpp` draft verification (`--spec-type draft-mtp`) yields a 1.4× – 1.8× speedup during generation without needing external draft models.
+
+### D. Native Fill-In-The-Middle (FIM) & Repository Infilling
+Native FIM tokens are baked directly into the 152K vocabulary for sub-100ms line completions in Cursor, VS Code, and Continue.dev:
+* `<|fim_prefix|>`: Code context prior to cursor.
+* `<|fim_suffix|>`: Code context past cursor.
+* `<|fim_middle|>`: Target generation region.
+* `<|repo_name|>` & `<|file_sep|>`: Multi-file repository indexing boundaries.
+
+### E. 262K Native Context & Hybrid Reasoning Control
+* **Context Capacity:** 262,144 native token context window, compressed via GDN states and `-ctk q4_0 -ctv q4_0` cache quantization.
+* **Dynamic reasoning_effort:** Toggle reasoning traces dynamically via chat template parameters:
+  * `none` / `low`: Fast inline completions and basic syntax generation.
+  * `medium`: Balanced multi-step refactoring and explanations.
+  * `high` / `xhigh`: Full CoT reasoning chains for deep debugging and system design.
 
 ---
 
-## 2. Comprehensive System RAM & VRAM Budget (32 GB RAM Target)
+## 4. Production Deployment Configurations
 
-| Component | Technical Specification | RAM Footprint |
-|---|---|---|
-| **Model Base Weights** | 48B Total / 8.0B Active (Q4_K_M + iMatrix Calibrated) | 24.80 GB |
-| **Embedded MTP Draft Tensors** | 2-Step Speculative Draft Heads (built-in GGUF) | 1.20 GB |
-| **GDN + QSA Context Cache** | 262K Context Window (q4_0 Quantized KV Cache) | 0.85 GB |
-| **N-Gram Lookup Table** | 20M Bigram/Trigram Entries (mmap CPU RAM System Cache) | 0.85 GB |
-| **Multi-Slot Runtime Overhead** | 4 Parallel IDE/Agent Request Slots (`--parallel 4`) | 1.60 GB |
-| **System Overhead** | OS, llama.cpp Engine, IDE Extensions | 2.20 GB |
-| **Total Memory Usage** | Target Budget Ceiling: 32.00 GB | 31.50 GB |
-| **Free RAM Headroom** | Safe Cushion for Compilers, Clangd, and OS | 0.50 GB |
-
----
-
-## 3. Production Deployment Commands (llama.cpp & Ollama)
-
-### A. Upstream llama-server Deployment
-This launch command activates FlashAttention-3, Multi-Token Prediction (MTP), KV-Cache Quantization, 4-Slot Parallel Decoding, and Dynamic Reasoning Control:
+### Upstream llama-server Deployment Script
+Compatible with official, unmodified `llama.cpp` builds (b3000 or newer):
 
 ```bash
-# Build llama.cpp with native hardware optimizations
+# Build llama.cpp with native AVX-512 / Metal / CUDA acceleration
 cmake -B build -DGGML_NATIVE=ON -DGGML_METAL=ON -DGGML_CUDA=ON
 cmake --build build --config Release -j
 
-# Launch high-concurrency production llama-server
+# Launch llama-server with 42B Q4_K_M weights and 7GB system buffer
 ./build/bin/llama-server \
-    -m ./models/AetherCode-Max8B-Prod-Q4_K_M.gguf \
+    -m ./models/AetherCode-Max8B-42B-Q4_K_M.gguf \
     --host 127.0.0.1 \
     --port 8080 \
     -c 262144 \
@@ -81,67 +102,49 @@ cmake --build build --config Release -j
     -ctv q4_0 \
     --spec-type draft-mtp \
     --spec-draft-n-max 2 \
-    --parallel 4 \
+    --parallel 2 \
     -t 8 \
     --mlock \
     --mmap \
     --chat-template-kwargs '{"reasoning_effort":"medium"}'
 ```
 
-### B. Ollama Modelfile with Native FIM & Tool-Calling Support
+### Ollama Deployment (Modelfile)
+* Define the `Modelfile`:
 
 ```dockerfile
-FROM ./models/AetherCode-Max8B-Prod-Q4_K_M.gguf
+FROM ./models/AetherCode-Max8B-42B-Q4_K_M.gguf
 
-# Context & Hardware Allocations
+# Context & Execution Allocation
 PARAMETER num_ctx 262144
 PARAMETER num_thread 8
 PARAMETER temperature 0.1
 PARAMETER top_p 0.95
 
-# FIM Infill Stop Tokens
+# FIM Special Stop Tokens
 PARAMETER stop "<|endoftext|>"
 PARAMETER stop "<|im_end|>"
 PARAMETER stop "<|fim_prefix|>"
 PARAMETER stop "<|fim_suffix|>"
 PARAMETER stop "<|fim_middle|>"
 
-# OpenAI / Cursor Compatible System Prompt
-SYSTEM """You are AetherCode, an expert coding assistant built on the Qwen4 architecture.
-You support structured JSON tool execution and high-speed code completion.
-When writing code, produce clean, robust, memory-safe, fully typed solutions."""
+SYSTEM """You are AetherCode, an expert coding assistant built on the Qwen4 / 42B MoE framework.
+Write clean, memory-safe, fully typed code."""
 ```
 
-Create and run:
+* Register and start in Ollama:
 
 ```bash
-ollama create aethercode-prod -f Modelfile
-ollama run aethercode-prod "Write a lock-free SPMC queue in C++20"
+ollama create aethercode-42b -f Modelfile
+ollama run aethercode-42b "Write an async HTTP connection pool in Rust"
 ```
 
 ---
 
-## 4. Real-Time IDE Autocomplete Query Protocol (FIM Payload)
+## 5. Performance & Throughput Targets
 
-When your IDE (Cursor, VS Code, or Continue.dev) triggers inline autocomplete via the OpenAI/Ollama API, it passes FIM tokens directly to the backend:
-
-```json
-POST /v1/completions
-{
-  "model": "aethercode-prod",
-  "prompt": "<|fim_prefix|>struct RingBuffer {\n    data: Vec<u8>,\n<|fim_suffix|>\n    pub fn new(capacity: usize) -> Self {\n        Self { data: vec![0; capacity] }\n    }\n}<|fim_middle|>",
-  "max_tokens": 128,
-  "temperature": 0.0,
-  "stop": ["<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "\n\n"]
-}
-```
-
----
-
-## 5. Final Performance Benchmarks across Modes
-
-| Operation Mode | reasoning_effort | Use Case Target | Target Speed |
+| Operation Mode | reasoning_effort | Primary Task Target | Expected Speed (Q4_K_M + MTP) |
 |---|---|---|---|
-| **Inline Autocomplete (FIM)** | `none` | Cursor / IDE Line Infilling | 70–90+ tok/sec |
-| **Code Review & Refactoring** | `low` / `medium` | Diff Generation & Bug Fixing | 45–55 tok/sec |
-| **Deep Reasoning & Architecture** | `high` / `xhigh` | Multi-File Agent Code Generation | 28–35 tok/sec |
+| **Inline Autocomplete (FIM)** | `none` | Cursor / IDE Line Infilling | 75–95+ tok/sec |
+| **Code Review & Refactoring** | `low` / `medium` | Diff Generation & Bug Fixing | 48–58 tok/sec |
+| **Deep Reasoning & Architecture** | `high` / `xhigh` | Multi-File Agentic Code Generation | 30–38 tok/sec |
