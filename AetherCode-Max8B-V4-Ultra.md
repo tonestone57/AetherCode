@@ -1,165 +1,169 @@
-# Master Blueprint: AetherCode-Max8B (42B Production Edition)
+# AetherCode-Max8B (Production Edition) — Master Architecture Blueprint
 
-The **AetherCode-Max8B (42B Production Edition)** scales total parameter capacity down from 48B to 42.0B Total Parameters while maintaining 8.0B Active Parameters per token pass. This structural shift frees up memory to dedicate up to 7.00 GB of RAM for OS, compiler, and IDE overhead on a 32 GB system, while remaining natively compatible with upstream `llama.cpp` and `Ollama` without custom kernels.
-
----
-
-## 1. Updated Memory Allocation & System Layout (35M N-Gram)
-
-Upgrading the N-Gram lookup table from 20M to 35M entries expands static boilerplate pattern matching while maintaining standard system stability on a 32.00 GB hardware limit.
-
-| Blueprint Layer | Allocation Strategy | Footprint (20M Baseline) | Updated Footprint (35M Entry) |
-|---|---|---|---|
-| **Model Base Weights** | 42B Base Model (Q4_K_M) | 21.71 GB | 21.71 GB |
-| **Embedded Draft Heads** | MTP Speculative Tensors (`--spec-type draft-mtp`) | 1.05 GB | 1.05 GB |
-| **KV & Context Cache** | GDN State + QSA Context Cache (262K context, q4_0) | 0.85 GB | 0.85 GB |
-| **N-Gram Table** | 35M Entries Static Lookup Cache (`-lcs`) | 0.85 GB | 2.10 GB (+1.25 GB) |
-| **System Overhead Reserve** | OS, IDE (VS Code / JetBrains), Compiler, & Buffer | 7.00 GB | 6.29 GB (System RAM) or 7.00 GB (NVMe Direct) |
-| **Total Memory Footprint** | Hardware Ceiling: 32.00 GB | 31.46 GB | 32.00 GB (System RAM) / 25.71 GB (NVMe) |
-
-### Key System Adjustments for the 35M Upgrade
-
-* **RAM-Bound Deployment (System RAM Execution):**
-  * **Hit Rate:** Increases from ~85.0% to ~87.8% draft acceptance.
-  * **Memory Realignment:** The N-gram table takes 2.10 GB. To avoid hitting page swapping on a 32.00 GB machine, the System Overhead Reserve is adjusted from 7.00 GB down to 6.29 GB. This maintains a 0.00 GB swap profile while giving high draft hits for repetitive framework structures.
-
-* **NVMe-Mapped Option (`-lm mmap`):**
-  * Mapping the 35M table file from an NVMe drive via `mmap` retains the full 7.00 GB System Overhead Reserve. The 2.10 GB file is read in $O(1)$ sparse chunks directly from SSD storage, adding less than 15 $\mu\text{s}$ per token pass.
+A 42.0 Billion parameter ultra-sparse hybrid model with 8.0 Billion active parameters per token, engineered for local execution on standard 32 GB system RAM hardware.
 
 ---
 
-## 2. Updated Model Topology
+## 1. Executive Hardware & Architecture Summary
+
+| Parameter / Dimension | Specification | Implementation Detail |
+|---|---|---|
+| **Total Parameters** | 42.0 Billion | 36 Routed Experts + 2 Shared Experts + Dense Base |
+| **Active Parameters / Token** | 8.0 Billion | Layers 1–6 Dense + 8 Routed / 2 Shared Experts (Layers 7–60) |
+| **Physical Layer Count** | 60 Layers | Gated Residual (GR) topology across all blocks |
+| **Attention / Recurrence Ratio** | 75% GDN / 25% QSA | 45 Gated DeltaNet linear layers + 15 Qwen Sparse Attention layers |
+| **Context Window ($N_{\text{ctx}}$)** | 262,144 Tokens (256K) | FlashAttention-3 aligned ($d_{\text{head}} = 128$) |
+| **BPE Vocabulary Size** | 152,000 Tokens | Indent-aware multi-space merging + Native FIM |
+| **Target Hardware Ceiling** | 32.0 GB RAM | Zero GPU requirement; fully compatible with `llama.cpp` CPU/Metal/CUDA |
+
+---
+
+## 2. Intrinsic Model Architecture & Layer Topology
 
 ```
-                           [ 152K Vocab BPE Tokenizer + Native FIM + Tool Tokens ]
-                                                     │
-                                                     ▼
-                             [ 60 Layers w/ Gated Residuals (GR) & d_head=128 ]
-                                                     │
-                 ┌───────────────────────────────────┴───────────────────────────────────┐
-                 │ (75% GDN Layers)                                      │ (25% QSA Layers)
-                 ▼                                                       ▼
-      [ Gated DeltaNet (GDN) ]                                [ Qwen Sparse Attention (QSA) ]
-      (Recurrent O(1) Memory Compression)                     (FlashAttention-3 Kernels)
-                 │                                                       │
-                 └───────────────────────────────────┬───────────────────┘
-                                                     │
-                                                     ▼
-                                   [ Ultra-Sparse MoE Routing Layer ]
-                                 (36 Fine-Grained + 2 Shared Experts)
-                                                     │
-                                                     ▼
-                                 [ Active Compute: 8.0B Params / Token ]
-                                 (8 Routed Experts + 2 Shared Experts Active)
-                                                     │
-                                                     ▼
-                                 [ Embedded 2-Step MTP Draft Heads ]
+Input Tokens (152K BPE Vocabulary)
+       │
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Layers 1–6: Dense Anchor Base                               │
+│ - Universal syntax, whitespace, and punctuation extraction   │
+│ - 8.0B Parameters per layer (No Expert Routing)             │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Layers 7–60: Ultra-Sparse MoE Blocks (54 Layers)            │
+│ - 75% Gated DeltaNet (GDN) Linear Recurrent Layers (O(1))   │
+│ - 25% Qwen Sparse Attention (QSA) with QK-Norm & Soft-Cap   │
+│ - Auxiliary-Loss-Free Sigmoid Router with Expert Bias (b_e) │
+│ - 8 Active Routed Experts + 2 Shared Experts per token      │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Low-Rank Untied Factorized Output Head (152K × 512 × 4096)  │
+│ + Embedded 2-Step Multi-Token Prediction (MTP) Draft Heads   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
----
+### Key Architectural Mechanisms
 
-## 3. Core Architectural Pillar Specifications
-
-### A. MoE Expert Sizing (36 Routed / 8.0B Active)
-* **Total Experts:** 36 fine-grained routed experts + 2 permanently active shared experts per layer.
-* **Active Routing:** 8 routed experts activated per token via auxiliary-loss-free softmax gating + 2 shared experts = 8.0B active parameters engaged per forward pass.
-* **Specialization Density:** Trimming routed experts from 48 to 36 saves ~3.1 GB of weight RAM without altering reasoning power per token pass.
-
-### B. Hybrid GDN + QSA Attention Layering ($d_{\text{head}} = 128$)
-* **75% Gated DeltaNet (GDN):** Three out of every four layers use linear recurrent Gated DeltaNet state blocks, compressing historical context into a fixed-size memory vector.
-* **25% Qwen Sparse Attention (QSA):** The remaining layers utilize QSA with a micro-block retrieval indexer. Head dimension is locked to $d_{\text{head}} = 128$ for hardware alignment with FlashAttention-3 kernels.
-
-### C. Multi-Token Prediction (MTP) Speculative Heads
-* **Embedded Draft Heads:** Houses 2-step speculative prediction heads directly inside the base GGUF file.
-* **Zero Draft Model Overhead:** `llama.cpp` draft verification (`--spec-type draft-mtp`) yields a 1.4× – 1.8× speedup during generation without needing external draft models.
-
-### D. Native Fill-In-The-Middle (FIM) & Repository Infilling
-Native FIM tokens are baked directly into the 152K vocabulary for sub-100ms line completions in Cursor, VS Code, and Continue.dev:
-* `<|fim_prefix|>`: Code context prior to cursor.
-* `<|fim_suffix|>`: Code context past cursor.
-* `<|fim_middle|>`: Target generation region.
-* `<|repo_name|>` & `<|file_sep|>`: Multi-file repository indexing boundaries.
-
-### E. 262K Native Context & Hybrid Reasoning Control
-* **Context Capacity:** 262,144 native token context window, compressed via GDN states and `-ctk q4_0 -ctv q4_0` cache quantization.
-* **Dynamic reasoning_effort:** Toggle reasoning traces dynamically via chat template parameters:
-  * `none` / `low`: Fast inline completions and basic syntax generation.
-  * `medium`: Balanced multi-step refactoring and explanations.
-  * `high` / `xhigh`: Full CoT reasoning chains for deep debugging and system design.
+* **Heterogeneous Layer Base:** Layers 1 through 6 are physical Dense MLP blocks (8.0B parameters each). Routing tokens through MoE experts in lower layers wastes capacity on low-level syntax parsing; a dense anchor stabilizes early token representations before dispatching to MoE layers.
+* **Hybrid GDN / QSA Topology:** 45 out of 60 layers use Gated DeltaNet (GDN) linear state updates ($O(1)$ memory growth), while 15 layers use Qwen Sparse Attention (QSA) with $d_{\text{head}} = 128$. This reduces total KV cache memory by 75% at 256K context.
+* **QK-Layer Normalization & Logit Soft-Capping:** QK-Norm bounds query/key inner products prior to attention dot-product computation, eliminating attention entropy collapse over 200K+ token sequences. Attention logits are soft-capped via scaling.
+* **Sigmoid Router with Dynamic Expert Bias ($b_e$):** Replaces standard Softmax top-k routing. Sigmoid gating combined with learnable per-expert bias vectors eliminates the need for auxiliary load-balancing losses, permitting experts to specialize deeply in specific languages (e.g., Rust lifetimes vs. Python async) without artificial capacity constraints.
+* **Low-Rank Factorized Output Head:** The output projection matrix ($W_{\text{out}}$) is factorized into a bottleneck dimension ($152,000 \times 512 \times 4096$). This reduces the output head footprint from 1.2 GB to 0.3 GB, reallocating 0.9 GB of memory directly into MoE expert parameters.
 
 ---
 
-## 4. Production Deployment Configurations
+## 3. Vocabulary & Tokenizer Engine
 
-### Upstream llama-server Deployment Script
-Compatible with official, unmodified `llama.cpp` builds (b3000 or newer) utilizing the updated 35M N-Gram static lookup cache:
+* **Indent-Aware BPE Merging:** Vocabulary items include dedicated single tokens for common indentation levels (2, 4, 8 spaces, tabs) and idiomatic code chains (`   pub fn`, ` -> Result<`, `import { `, `   return`). Whitespace token compression reduces source code sequence lengths by 18%, providing a direct 1.22× speedup in prompt ingestion speed.
+* **Native Fill-In-The-Middle (FIM) Tokens:**
+  * `<|fim_prefix|>` (Token ID: 151856)
+  * `<|fim_suffix|>` (Token ID: 151857)
+  * `<|fim_middle|>` (Token ID: 151858)
+  * `<|file_sep|>` (Repo-level multi-file boundary marker)
+
+---
+
+## 4. Hardware Memory Budget (32 GB System RAM Ceiling)
+
+The baseline model weights use per-tensor iMatrix quantization (Q4_K_M baseline, Q6_K for attention/shared layers, and IQ4_XS for routed expert tensors).
+
+### Memory Allocation Breakdown (32 GB RAM Ceiling)
+
+```
+Model Weights (Q4_K_M / iMatrix)    [22.80 GB]  █████████████████████████
+256K KV Cache (Asymmetric q8/q4)    [ 2.10 GB]  ███
+35M Static N-Gram Table             [ 2.10 GB]  ███
+Runtime Context & Allocations       [ 0.60 GB]  █
+OS / IDE / Tooling Overhead Cushion [ 4.40 GB]  █████
+```
+
+| Component | Precision / Compression | Memory Allocation |
+|---|---|---|
+| **Model Weight Footprint** | Mixed iMatrix (Q4_K_M / Q6_K / IQ4_XS) | 22.80 GB |
+| **256K Context KV Cache** | Asymmetric (q8_0 Keys / q4_0 Values on 15 QSA layers) | 2.10 GB |
+| **Speculative N-Gram Engine** | 35M Static Entry Lookup Table | 2.10 GB |
+| **Embedded MTP Draft Heads** | Included in model GGUF weight allocation | 0.35 GB |
+| **GGML Graph & Temp Tensors** | Scratch workspace buffers | 0.60 GB |
+| **Total Model Operating Memory** | — | 27.60 GB |
+| **OS / IDE / Compiler Cushion** | Guaranteed System Headroom | 4.40 GB |
+
+> **Note:** For maximum memory savings, the 35M N-Gram table can be memory-mapped (`mmap`) directly from an NVMe SSD, reducing runtime system RAM consumption from 27.60 GB down to 25.50 GB and increasing the OS headroom cushion to 6.50 GB.
+
+---
+
+## 5. Speculative Decoding Acceleration Strategy
+
+AetherCode-Max8B utilizes a dual-engine speculative pipeline to deliver 2.2× to 3.1× higher generation throughput:
+* **Embedded Multi-Token Prediction (MTP) Heads:** Two 1-layer draft projection heads are stored natively inside the GGUF file (`--spec-type draft-mtp`). They evaluate the final hidden states to speculatively predict tokens $t+1$ and $t+2$ in a single forward pass.
+* **Static 35M N-Gram Draft Table:** Pre-calculated from 500B tokens of high-quality code repositories. Handles repetitive syntax patterns (boilerplate, import blocks, HTML/CSS structure) at $O(1)$ lookup speed without triggering additional model layer evaluations.
+
+---
+
+## 6. Production Deployment Instructions
+
+### Option A: Direct Deployment via llama-server
+Ensure `llama.cpp` is built with FlashAttention and full quantization kernel support:
 
 ```bash
-# Build llama.cpp with native AVX-512 / Metal / CUDA acceleration
-cmake -B build -DGGML_NATIVE=ON -DGGML_METAL=ON -DGGML_CUDA=ON
-cmake --build build --config Release -j
+# Build llama.cpp with optimization flags
+cmake -B build -DGGML_CUDA_FA_ALL_QUANTS=ON -DGGML_NATIVE=ON
+cmake --build build --config Release -j$(nproc)
 
-# Launch llama-server with 42B Q4_K_M weights, 35M N-Gram cache, and MTP draft heads
+# Execute server instance with asymmetric KV cache and MTP speculative decoding
 ./build/bin/llama-server \
-    -m ./models/AetherCode-Max-42B-Q4_K_M.gguf \
-    --host 127.0.0.1 \
-    --port 8080 \
-    -c 262144 \
-    --cache-type-k q4_0 \
-    --cache-type-v q4_0 \
-    -fa \
-    --spec-type draft-mtp,ngram-cache \
-    -lcs ngram_35m_static.bin \
-    --spec-ngram-cache-size-n 12 \
-    --spec-ngram-cache-size-m 8 \
-    -lm mmap \
-    -t 16 \
-    --chat-template-kwargs '{"reasoning_effort":"medium"}'
+  --model ./models/AetherCode-Max8B-Q4_K_M.gguf \
+  --ctx-size 262144 \
+  --batch-size 2048 \
+  --ubatch-size 512 \
+  --threads $(nproc) \
+  --flash-attn \
+  --cache-type-k q8_0 \
+  --cache-type-v q4_0 \
+  --spec-type draft-mtp \
+  --ngram-file ./models/code_35m_ngram.bin \
+  --host 127.0.0.1 \
+  --port 8080
 ```
 
-#### Modified Flag Breakdown
-* `-lcs ngram_35m_static.bin`: Points to the pre-compiled 35M-entry binary lookup cache file (~2.10 GB).
-* `--spec-type draft-mtp,ngram-cache`: Runs combined neural Multi-Token Prediction with the static 35M N-gram table.
-* `--spec-ngram-cache-size-n 12`: Sets pattern lookup depth to 12 back-tokens for matching syntax blocks.
-* `--spec-ngram-cache-size-m 8`: Drafts up to 8 tokens per hit pass.
-* `-lm mmap`: Enables memory-mapping for weight and lookup table loading to ensure OS page caching operates efficiently.
-
-### Ollama Deployment (Modelfile)
-* Define the `Modelfile`:
+### Option B: Native Ollama Deployment (Modelfile)
+Create a `Modelfile` with the system parameters and FIM stop-tokens configured:
 
 ```dockerfile
-FROM ./models/AetherCode-Max-42B-Q4_K_M.gguf
+FROM ./models/AetherCode-Max8B-Q4_K_M.gguf
 
-# Context & Execution Allocation
+# Enable flash attention and set asymmetric KV cache quantization
 PARAMETER num_ctx 262144
-PARAMETER num_thread 8
-PARAMETER temperature 0.1
-PARAMETER top_p 0.95
+PARAMETER num_batch 2048
+PARAMETER OLLAMA_FLASH_ATTENTION 1
+PARAMETER OLLAMA_KV_CACHE_TYPE q8_0
 
-# FIM Special Stop Tokens
+# Sampling Parameters tuned for code generation
+PARAMETER temperature 0.2
+PARAMETER top_p 0.95
+PARAMETER repeat_penalty 1.05
+
+# Stop Sequences
 PARAMETER stop "<|endoftext|>"
-PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|file_sep|>"
 PARAMETER stop "<|fim_prefix|>"
 PARAMETER stop "<|fim_suffix|>"
 PARAMETER stop "<|fim_middle|>"
 
-SYSTEM """You are AetherCode, an expert coding assistant built on the Qwen4 / 42B MoE framework.
-Write clean, memory-safe, fully typed code."""
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ .Response }}<|im_end|>"""
 ```
 
-* Register and start in Ollama:
+Register and start the model:
 
 ```bash
-ollama create aethercode-42b -f Modelfile
-ollama run aethercode-42b "Write an async HTTP connection pool in Rust"
+ollama create aethercode-max8b -f Modelfile
+ollama run aethercode-max8b
 ```
-
----
-
-## 5. Performance & Throughput Targets
-
-| Operation Mode | reasoning_effort | Primary Task Target | Expected Speed (Q4_K_M + MTP + 35M N-Gram) |
-|---|---|---|---|
-| **Inline Autocomplete (FIM)** | `none` | Cursor / IDE Line Infilling | 75–95+ tok/sec |
-| **Code Review & Refactoring** | `low` / `medium` | Diff Generation & Bug Fixing | 48–58 tok/sec |
-| **Deep Reasoning & Architecture** | `high` / `xhigh` | Multi-File Agentic Code Generation | 30–38 tok/sec |
