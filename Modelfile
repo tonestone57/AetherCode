@@ -1,0 +1,28 @@
+FROM ./models/AetherCode-33B-Q5_K_M.gguf
+
+# 128K context size for 32GB RAM operation
+PARAMETER num_ctx 131072
+PARAMETER num_batch 4096
+PARAMETER temperature 0.10
+PARAMETER top_p 0.90
+
+# Penalties tuned specifically for code generation stability
+PARAMETER repeat_penalty 1.00
+PARAMETER presence_penalty 0.10
+
+# FIM and Control Stop Markers
+PARAMETER stop "<|endoftext|>"
+PARAMETER stop "<|file_sep|>"
+PARAMETER stop "<|fim_prefix|>"
+PARAMETER stop "<|fim_suffix|>"
+PARAMETER stop "<|fim_middle|>"
+PARAMETER stop "</think>"
+
+# Jinja Chat Template supporting optional Reasoning block execution
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ if .Response }}{{ .Response }}{{ else }}<think>
+{{ end }}"""
