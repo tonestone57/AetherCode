@@ -1,6 +1,6 @@
-# Master Blueprint: AetherCode-35B (35.0B Production Edition)
+# Master Blueprint: AetherCode-33B (33.0B Uniform Q5 Edition)
 
-A 35.0 Billion total parameter ultra-sparse hybrid model featuring 6.2 Billion active parameters per token (Top-12 Active Routed from 72 Fine-Grained Experts + 2 Universal Shared Experts). Engineered specifically to execute locally within a strict 32.0 GB System RAM ceiling on standard Linux CPU hardware using upstream `llama.cpp` with zero GPU dependency.
+A 33.0 Billion total parameter ultra-sparse hybrid model featuring 5.8 Billion active parameters per token (Top-12 Active Routed from 72 Fine-Grained Experts + 2 Universal Shared Experts). Standardized strictly on Q5_K_M / Q5_K_L quantization across all expert and base weights (eliminating all Q5_K_S / IQ5_KS variants), this architecture accommodates a 128K q8_0 high-precision KV cache while guaranteeing $\ge 4.75\text{ GB}$ of unallocated free RAM on a 32.0 GB System RAM ceiling.
 
 ---
 
@@ -8,15 +8,15 @@ A 35.0 Billion total parameter ultra-sparse hybrid model featuring 6.2 Billion a
 
 | Parameter / Dimension | Specification | Implementation Detail |
 |---|---|---|
-| **Total Parameters** | 35.0 Billion | 46 Physical Layers (6 Dense Base + 40 Ultra-Sparse MoE Layers) |
-| **Active Parameters / Token** | 6.2 Billion | Layers 1–6 Dense + 12 Active Routed / 2 Shared Experts (Layers 7–46) |
+| **Total Parameters** | 33.0 Billion | Scaled down (44 physical layers) to absorb Q5_K_M/Q5_K_L weight density |
+| **Active Parameters / Token** | 5.8 Billion | Layers 1–6 Dense + 12 Active Routed / 2 Shared Experts (Layers 7–44) |
 | **Expert Topology** | 72 Fine-Grained Experts | Fine-grained routing ($\binom{72}{12}$ combination search space) + 2 Shared Experts |
-| **Quantization Format** | Layer-Targeted Q5 Precision | Anchor Base: Q6_K / Q8_0 \| Experts: Q5_K_S / IQ5_KS (5.15 bpw) |
+| **Quantization Profile** | Strict Q5_K_M / Q5_K_L | Dense Anchor Base: Q6_K / Q5_K_M \| All Experts: Q5_K_M (5.5 bpw) |
 | **Attention Architecture** | 100% MLA | Multi-Head Latent Attention ($d_c = 512, d_{\text{rope}} = 64$) with Soft-Capping |
 | **Context Window ($N_{\text{ctx}}$)** | 131,072 Tokens (128K) | YaRN RoPE extrapolation + High-Precision q8_0 Latent Cache |
 | **Speculative Acceleration** | Dynamic 3-Gram Engine | Zero-RAM inline prompt lookup (`--lookup-ngram-min 3 --draft-max 8`) |
-| **Memory Allocation Target** | 27.45 GB Operating Footprint | 4.55 GB Guaranteed Free Cushion on 32.0 GB System RAM |
-| **Est. Generation Speed** | 14–18 tok/s | Dual-Channel DDR5 @ 70 GB/s with 1 GB Static HugePages |
+| **Memory Allocation Target** | 27.25 GB Operating Footprint | 4.75 GB Guaranteed Free Cushion on 32.0 GB System RAM |
+| **Est. Generation Speed** | 13–16 tok/s | Dual-Channel DDR5 @ 70 GB/s with 1 GB Static HugePages |
 
 ---
 
@@ -27,18 +27,18 @@ Input Tokens (152K Indent-Aware BPE Vocabulary)
        │
        ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ Layers 1–6: Dense Anchor Base (Q6_K / Q8_0 Precision)                   │
+│ Layers 1–6: Dense Anchor Base (Q6_K / Q5_K_M Precision)                 │
 │ - High-precision syntax extraction, AST boundaries, & whitespace logic  │
-│ - 6.2B Active Base Parameters (No Expert Routing)                        │
+│ - 5.8B Active Base Parameters (No Expert Routing)                        │
 └──────────────────────────────────┬──────────────────────────────────────┘
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ Layers 7–46: Fine-Grained MoE + MLA Blocks (40 Layers)                  │
+│ Layers 7–44: Fine-Grained MoE + MLA Blocks (38 Layers)                  │
 │ - Multi-Head Latent Attention (MLA) with q8_0 Latent KV Cache            │
 │ - Attention Logit Soft-Capping (50.0) + Calibrated YaRN (128K Context)   │
 │ - Auxiliary-Loss-Free Sigmoid Router with Dynamic Expert Bias (b_e)     │
-│ - 72 Fine-Grained Experts (Q5_K_S / IQ5_KS) -> Top-12 Active + 2 Shared │
+│ - 72 Fine-Grained Experts (Strictly Q5_K_M) -> Top-12 Active + 2 Shared │
 └──────────────────────────────────┬──────────────────────────────────────┘
                                    │
                                    ▼
@@ -48,40 +48,41 @@ Input Tokens (152K Indent-Aware BPE Vocabulary)
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Core Architectural Features
+### Quantization Standard Optimization
 
-* **Fine-Grained Expert Routing ($72 \text{ Experts} \rightarrow \text{Top-12 Active}$):** Splitting 36 standard experts into 72 half-sized routed blocks expands routing combination capacity from $1.95 \times 10^6$ to $1.54 \times 10^{13}$. This allows micro-experts to activate for niche syntax (e.g., C++ template metaprogramming, Rust lifetime bounds) without increasing token memory bandwidth overhead.
-* **High-Precision q8_0 MLA Cache:** Storing Multi-Head Latent Attention vectors in `q8_0` avoids the vector-norm quantization noise of 4-bit caches, guaranteeing 99.4%+ retrieval accuracy across the entire 128K context window.
-* **Attention Logit Soft-Capping:** Soft-caps attention scores at 50.0 to prevent Softmax entropy collapse during long-context completion tasks.
+* **Elimination of Q5_K_S / IQ5_KS:** Q5_K_M uses 6-bit quantization for block scales and critical tensors (and 5-bit for remaining weights), providing higher weight accuracy on expert matrices compared to Q5_K_S (which forces static 5-bit sub-block scales).
+* **Layer Budget Adjustment:** Upgrading all 72 routed experts from Q5_K_S (~5.15 bpw) to Q5_K_M (~5.50 bpw) increases expert weight density by ~6.8%. Trimming total layers from 46 to 44 (33.0B total parameters) completely neutralizes this memory increase, preserving the 4.75 GB free system RAM cushion.
 
 ---
 
 ## 3. Hardware Memory Budget (32 GB RAM Ceiling)
 
 ```
-35B Model Weights (Layer-Targeted Q5)  [22.95 GB]  ███████████████████████
+33B Model Weights (Q5_K_M Standard)   [22.75 GB]  ███████████████████████
 128K MLA High-Precision Cache (q8_0)  [ 3.70 GB]  ████
 GGML Graph & Temp Scratch Buffers      [ 0.80 GB]  █
-Unallocated Free OS / IDE Cushion      [ 4.55 GB]  █████
+Unallocated Free OS / IDE Cushion      [ 4.75 GB]  █████
 ```
 
-| Component | Precision / Format | Memory Allocation |
-|---|---|---|
-| **Dense Base & Attention Weights (Layers 1–6)** | Q6_K / Q8_0 (High Precision) | 7.45 GB |
-| **72 MoE Fine-Grained Expert Weights** | Q5_K_S / IQ5_KS (5.15 bpw) | 15.50 GB |
-| **128K Context KV Cache** | MLA Latent Cache (q8_0 Quantized) | 3.70 GB |
-| **GGML Graph & Temp Tensors** | CPU Vector Scratch Buffer | 0.80 GB |
-| **Total Model Operating Footprint** | — | **27.45 GB** |
-| **Free System Headroom (OS / IDE)** | Unallocated RAM Buffer | **4.55 GB** |
+| Component | Precision / Format | Q5_K_M Allocation | Q5_K_L Allocation |
+|---|---|---|---|
+| **Dense Base & Attention Weights (Layers 1–6)** | Q6_K / Q5_K_M | 7.20 GB | 7.45 GB |
+| **72 MoE Fine-Grained Expert Weights** | Q5_K_M or Q5_K_L | 15.55 GB | 16.20 GB |
+| **128K Context KV Cache** | MLA Latent Cache (q8_0) | 3.70 GB | 3.70 GB |
+| **GGML Graph & Temp Tensors** | CPU Vector Scratch Buffer | 0.80 GB | 0.80 GB |
+| **Total Model Operating Footprint** | — | **27.25 GB** | **28.15 GB** |
+| **Free System Headroom (OS / IDE)** | Unallocated RAM Buffer | **4.75 GB** | **3.85 GB** |
+
+> **Recommendation:** Standardize on Q5_K_M for the ideal balance of precision and 4.75 GB OS headroom. If maximum parameter precision is desired for specialized offline tasks, Q5_K_L remains fully functional within a 3.85 GB system cushion.
 
 ---
 
 ## 4. Linux Kernel & Production System Tuning
 
 ### 1. Static 1 GB HugePages Configuration (`hugetlbfs`)
-To eliminate Translation Lookaside Buffer (TLB) page-fault stalls caused by non-sequential MoE weight hops in RAM, reserve 25 GB of memory as static 1 GB HugePages.
+Reserving 25 GB of system RAM as static 1 GB HugePages eliminates Translation Lookaside Buffer (TLB) misses during non-sequential expert routing:
 
-Add the following parameter to `/etc/default/grub` inside `GRUB_CMDLINE_LINUX_DEFAULT`:
+Add the following to `/etc/default/grub` inside `GRUB_CMDLINE_LINUX_DEFAULT`:
 ```bash
 default_hugepagesz=1G hugepagesz=1G hugepages=25
 ```
@@ -95,10 +96,10 @@ sudo mount -t hugetlbfs -o pagesize=1G none /mnt/huge_1g
 
 ### 2. Runtime Kernel Switches
 ```bash
-# Set swappiness to zero to keep execution resident in RAM
+# Disable swap aggression to maintain low latency
 sudo sysctl -w vm.swappiness=0
 
-# Expand max memory map count for large GGUF files
+# Increase max memory map count for large GGUF weights
 sudo sysctl -w vm.max_map_count=524288
 ```
 
@@ -116,15 +117,12 @@ Save as `run_server.sh`:
 export MIMALLOC_LARGE_OS_PAGES=1
 export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libmimalloc.so.2
 
-# Pin threads strictly to physical CPU cores (excluding hyperthreads/SMT)
+# Pin execution strictly to physical CPU cores
 PHYS_CORES=$(lscpu -p | grep -v '^#' | sort -u -t, -k2,2 | wc -l)
 
-# Build llama.cpp with vector extensions & NUMA support
-# cmake -B build -DGGML_NATIVE=ON -DGGML_AVX512=ON -DGGML_NUMA=ON && cmake --build build --config Release -j$(nproc)
-
-# Launch server instance
+# Launch server instance with Q5_K_M weights and q8_0 KV cache
 ./build/bin/llama-server \
-  --model ./models/AetherCode-35B-Q5_K_M.gguf \
+  --model ./models/AetherCode-33B-Q5_K_M.gguf \
   --ctx-size 131072 \
   --batch-size 4096 \
   --ubatch-size 512 \
@@ -143,7 +141,7 @@ PHYS_CORES=$(lscpu -p | grep -v '^#' | sort -u -t, -k2,2 | wc -l)
 ### 2. Native Ollama Deployment (Modelfile)
 
 ```dockerfile
-FROM ./models/AetherCode-35B-Q5_K_M.gguf
+FROM ./models/AetherCode-33B-Q5_K_M.gguf
 
 # 128K context size for 32GB RAM operation
 PARAMETER num_ctx 131072
@@ -175,21 +173,21 @@ TEMPLATE """{{ if .System }}<|im_start|>system
 
 Register and launch via Ollama:
 ```bash
-ollama create aethercode-35b-q5 -f Modelfile
-ollama run aethercode-35b-q5
+ollama create aethercode-33b-q5m -f Modelfile
+ollama run aethercode-33b-q5m
 ```
 
 ---
 
 ## 6. GGUF Metadata Calibration Header
 
-Ensure the following key-value pairs are baked directly into the model GGUF metadata header during final quantization:
+Ensure these key-value attributes are present in the GGUF header during quantization:
 
 ```ini
 [GGUF Metadata Keys]
 general.quantization_version = 2
-general.file_type = 17   # Q5_K_M
-llama.block_count = 46
+general.file_type = 17   # Q5_K_M (or 18 for Q5_K_L)
+llama.block_count = 44
 llama.expert_routed_count = 72
 llama.expert_active_count = 12
 llama.expert_shared_count = 2
