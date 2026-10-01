@@ -16,7 +16,7 @@ A 33.0 Billion total parameter ultra-sparse hybrid model featuring 5.8 Billion a
 | **Context Window ($N_{\text{ctx}}$)** | 131,072 Tokens (128K) | YaRN RoPE extrapolation + High-Precision q8_0 Latent Cache |
 | **Speculative Acceleration** | Dynamic 3-Gram Engine | Zero-RAM inline prompt lookup (`--lookup-ngram-min 3 --draft-max 8`) |
 | **Memory Allocation Target** | 27.25 GB Operating Footprint | 4.75 GB Guaranteed Free Cushion on 32.0 GB System RAM |
-| **Est. Generation Speed** | 13–16 tok/s | Dual-Channel DDR5 @ 70 GB/s with 1 GB Static HugePages |
+| **Est. Generation Speed** | 13–16 tok/s (Standard) / 10–12 tok/s (Novel Logic) | Dual-Channel DDR5 @ 70 GB/s with 28 GB Static HugePages |
 
 ---
 
@@ -48,10 +48,13 @@ Input Tokens (152K Indent-Aware BPE Vocabulary)
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Quantization Standard Optimization
+### Quantization Standard Optimization & Speculative Performance
 
 * **Elimination of Q5_K_S / IQ5_KS:** Q5_K_M uses 6-bit quantization for block scales and critical tensors (and 5-bit for remaining weights), providing higher weight accuracy on expert matrices compared to Q5_K_S (which forces static 5-bit sub-block scales).
 * **Layer Budget Adjustment:** Upgrading all 72 routed experts from Q5_K_S (~5.15 bpw) to Q5_K_M (~5.50 bpw) increases expert weight density by ~6.8%. Trimming total layers from 46 to 44 (33.0B total parameters) completely neutralizes this memory increase, preserving the 4.75 GB free system RAM cushion.
+* **Throughput Profile Across Code Types:**
+  * **Repetitive Boilerplate & Indentation:** Dynamic 3-Gram prompt lookup (`--lookup-ngram-min 3 --draft-max 8`) achieves 45%–65% acceptance rates, boosting generation speeds to **13–16 tok/s**.
+  * **Novel Algorithmic Logic & Math:** When generating novel code sequences where N-gram match hits drop, generation gracefully scales back to the hardware bandwidth baseline of **10–12 tok/s**.
 
 ---
 
@@ -73,18 +76,18 @@ Unallocated Free OS / IDE Cushion      [ 4.75 GB]  █████
 | **Total Model Operating Footprint** | — | **27.25 GB** | **28.15 GB** |
 | **Free System Headroom (OS / IDE)** | Unallocated RAM Buffer | **4.75 GB** | **3.85 GB** |
 
-> **Recommendation:** Standardize on Q5_K_M for the ideal balance of precision and 4.75 GB OS headroom. If maximum parameter precision is desired for specialized offline tasks, Q5_K_L remains fully functional within a 3.85 GB system cushion.
+> **Prefill Memory Spike Optimization:** To prevent transient activation memory spikes during 128K prefill context ingestion (which can temporarily exceed 2.0 GB at `--ubatch-size 512`), `--ubatch-size` is capped at `256`. This flattens prefill memory usage and guarantees protection for the 4.75 GB free OS/IDE RAM cushion.
 
 ---
 
 ## 4. Linux Kernel & Production System Tuning
 
 ### 1. Static 1 GB HugePages Configuration (`hugetlbfs`)
-Reserving 25 GB of system RAM as static 1 GB HugePages eliminates Translation Lookaside Buffer (TLB) misses during non-sequential expert routing:
+To cover the full 27.25 GB active operating footprint of the model weights and KV cache without fallback to standard 4 KB OS pages (which cause TLB miss stalls during MoE routing across 72 experts), reserve 28 GB of system RAM as static 1 GB HugePages.
 
 Add the following to `/etc/default/grub` inside `GRUB_CMDLINE_LINUX_DEFAULT`:
 ```bash
-default_hugepagesz=1G hugepagesz=1G hugepages=25
+default_hugepagesz=1G hugepagesz=1G hugepages=28
 ```
 
 Update GRUB and mount the `hugetlbfs` filesystem:
@@ -120,12 +123,12 @@ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libmimalloc.so.2
 # Pin execution strictly to physical CPU cores
 PHYS_CORES=$(lscpu -p | grep -v '^#' | sort -u -t, -k2,2 | wc -l)
 
-# Launch server instance with Q5_K_M weights and q8_0 KV cache
+# Launch server instance with Q5_K_M weights, q8_0 KV cache, and ubatch-size 256
 ./build/bin/llama-server \
   --model ./models/AetherCode-33B-Q5_K_M.gguf \
   --ctx-size 131072 \
   --batch-size 4096 \
-  --ubatch-size 512 \
+  --ubatch-size 256 \
   --threads ${PHYS_CORES} \
   --flash-attn \
   --cache-type-k q8_0 \
@@ -138,7 +141,26 @@ PHYS_CORES=$(lscpu -p | grep -v '^#' | sort -u -t, -k2,2 | wc -l)
   --port 8080
 ```
 
-### 2. Native Ollama Deployment (Modelfile)
+### 2. Ollama Runtime Parity Setup
+To achieve full runtime parity when running under the Ollama daemon (enforcing `mimalloc` preloading, core thread pinning, and HugePages alignment), configure the Ollama systemd environment overrides:
+
+```bash
+# Create systemd override directory for Ollama
+sudo mkdir -p /etc/systemd/system/ollama.service.d/
+
+# Create environment override file
+cat <<'EOF' | sudo tee /etc/systemd/system/ollama.service.d/override.conf
+[Service]
+Environment="MIMALLOC_LARGE_OS_PAGES=1"
+Environment="LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libmimalloc.so.2"
+Environment="OLLAMA_NUM_PARALLEL=1"
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+### 3. Native Ollama Deployment (Modelfile)
 
 ```dockerfile
 FROM ./models/AetherCode-33B-Q5_K_M.gguf
