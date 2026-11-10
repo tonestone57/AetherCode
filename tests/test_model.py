@@ -15,7 +15,8 @@ from aethercode.model import (
     FactorizedOutputHead,
     AetherCode33BForCausalLM,
 )
-from aethercode.convert_gguf import get_aethercode_gguf_metadata
+import warnings
+from aethercode.convert_gguf import get_aethercode_gguf_metadata, build_gguf_writer
 
 
 @pytest.fixture
@@ -138,3 +139,62 @@ def test_gguf_metadata_calibration():
     assert meta["llama.attention.logit_softcapping"] == 50.0
     assert meta["llama.rope.scaling.type"] == "yarn"
     assert meta["llama.rope.scaling.factor"] == 32.0
+
+
+def test_gguf_writer_no_duplicate_warnings(tmp_path):
+    config = AetherCode33BConfig()
+    output_path = str(tmp_path / "test_model.gguf")
+    with warnings.catch_warnings(record=True) as recorded_warnings:
+        warnings.simplefilter("always")
+        writer = build_gguf_writer(output_path, config)
+        assert len(recorded_warnings) == 0
+
+
+def test_model_mixed_precision_bfloat16(mini_config):
+    model = AetherCode33BForCausalLM(mini_config).to(torch.bfloat16)
+    input_ids = torch.randint(0, mini_config.vocab_size, (2, 8))
+    logits = model(input_ids)
+    assert logits.dtype == torch.bfloat16
+    assert logits.shape == (2, 8, mini_config.vocab_size)
+    loss = logits.sum()
+    loss.backward()
+
+
+def test_attention_masks(mini_config):
+    mla = MultiHeadLatentAttention(mini_config)
+    x = torch.randn(2, 6, mini_config.hidden_size)
+
+    # 2D boolean mask
+    mask_bool = torch.tensor([
+        [True, True, True, True, True, False],
+        [True, True, True, True, True, True],
+    ])
+    out_bool = mla(x, attention_mask=mask_bool)
+    assert out_bool.shape == (2, 6, mini_config.hidden_size)
+
+    # 2D float mask (1.0 = attend, 0.0 = mask)
+    mask_float = torch.tensor([
+        [1.0, 1.0, 1.0, 1.0, 1.0, 0.0],
+        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    ])
+    out_float = mla(x, attention_mask=mask_float)
+    assert out_float.shape == (2, 6, mini_config.hidden_size)
+
+    # 4D additive mask
+    mask_4d = torch.zeros(2, 1, 6, 6)
+    mask_4d[:, :, :, -1] = float("-inf")
+    out_4d = mla(x, attention_mask=mask_4d)
+    assert out_4d.shape == (2, 6, mini_config.hidden_size)
+
+
+def test_moe_routed_scaling_factor(mini_config):
+    mini_config.routed_scaling_factor = 1.0
+    mini_config.num_shared_experts = 0
+    moe1 = FineGrainedMoE(mini_config)
+
+    mini_config.routed_scaling_factor = 2.0
+    moe2 = FineGrainedMoE(mini_config)
+    moe2.load_state_dict(moe1.state_dict())
+
+    x = torch.randn(2, 4, mini_config.hidden_size)
+    torch.testing.assert_close(moe2(x), moe1(x) * 2.0)

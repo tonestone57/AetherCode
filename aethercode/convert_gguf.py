@@ -45,11 +45,17 @@ def build_gguf_writer(output_path: str, config: AetherCode33BConfig) -> gguf.GGU
     """
     Initializes a GGUFWriter with metadata calibrated according to Section 6.
     """
-    writer = gguf.GGUFWriter(output_path, "llama")
+    arch = "llama"
+    writer = gguf.GGUFWriter(output_path, arch)
     metadata = get_aethercode_gguf_metadata(config)
 
     for key, val in metadata.items():
-        if isinstance(val, int):
+        # Skip general.architecture as it is already initialized by GGUFWriter(..., arch)
+        if key == "general.architecture":
+            continue
+        if isinstance(val, bool):
+            writer.add_bool(key, val)
+        elif isinstance(val, int):
             writer.add_uint32(key, val)
         elif isinstance(val, float):
             writer.add_float32(key, val)
