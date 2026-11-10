@@ -72,8 +72,8 @@ class YaRNRotaryEmbedding(nn.Module):
         t = torch.arange(seq_len, device=x.device, dtype=self.inv_freq.dtype)
         freqs = torch.outer(t, self.inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
-        cos = emb.cos() * self.attn_factor
-        sin = emb.sin() * self.attn_factor
+        cos = (emb.cos() * self.attn_factor).to(dtype=x.dtype)
+        sin = (emb.sin() * self.attn_factor).to(dtype=x.dtype)
         return cos, sin
 
 
@@ -176,15 +176,39 @@ class MultiHeadLatentAttention(nn.Module):
         if self.softcapping is not None and self.softcapping > 0:
             attn_scores = self.softcapping * torch.tanh(attn_scores / self.softcapping)
 
-        # Causal mask
-        if attention_mask is None and seq_len > 1:
-            causal_mask = torch.full((seq_len, seq_len), float("-inf"), device=hidden_states.device)
-            causal_mask = torch.triu(causal_mask, diagonal=1)
-            attn_scores = attn_scores + causal_mask.unsqueeze(0).unsqueeze(0)
-        elif attention_mask is not None:
-            attn_scores = attn_scores + attention_mask
+        # Build causal mask if seq_len > 1
+        if seq_len > 1:
+            causal_mask = torch.full(
+                (seq_len, seq_len),
+                float("-inf"),
+                device=hidden_states.device,
+                dtype=attn_scores.dtype,
+            )
+            causal_mask = torch.triu(causal_mask, diagonal=1).unsqueeze(0).unsqueeze(0)
+            attn_scores = attn_scores + causal_mask
 
-        attn_weights = F.softmax(attn_scores, dim=-1)
+        # Apply user-provided attention mask if given
+        if attention_mask is not None:
+            # If attention mask is 2D [B, L], convert to additive mask [B, 1, 1, L]
+            if attention_mask.dim() == 2:
+                # 1 for token to attend to, 0 for masked token; or boolean
+                if attention_mask.dtype == torch.bool:
+                    extended_mask = torch.zeros(
+                        attention_mask.shape[0], 1, 1, seq_len,
+                        device=hidden_states.device,
+                        dtype=attn_scores.dtype
+                    )
+                    extended_mask = extended_mask.masked_fill(~attention_mask.unsqueeze(1).unsqueeze(2), float("-inf"))
+                    attn_scores = attn_scores + extended_mask
+                else:
+                    extended_mask = (1.0 - attention_mask[:, None, None, :].to(dtype=attn_scores.dtype)) * float("-inf")
+                    attn_scores = attn_scores + extended_mask
+            elif attention_mask.dim() == 3:
+                attn_scores = attn_scores + attention_mask.unsqueeze(1).to(dtype=attn_scores.dtype)
+            elif attention_mask.dim() == 4:
+                attn_scores = attn_scores + attention_mask.to(dtype=attn_scores.dtype)
+
+        attn_weights = F.softmax(attn_scores, dim=-1, dtype=torch.float32).to(dtype=v.dtype)
 
         # Context output
         context = torch.matmul(attn_weights, v)  # [B, N_heads, L, v_head_dim]
@@ -241,6 +265,7 @@ class FineGrainedMoE(nn.Module):
         self.num_routed = config.num_routed_experts
         self.num_shared = config.num_shared_experts
         self.top_k = config.num_active_experts
+        self.routed_scaling_factor = config.routed_scaling_factor
 
         self.router = SigmoidRouter(config)
 
@@ -278,9 +303,12 @@ class FineGrainedMoE(nn.Module):
                 if mask.any():
                     selected_states = flat_states[mask]
                     exp_out = self.routed_experts[exp_id](selected_states)
-                    routed_output[mask] += exp_out * exp_weights[mask]
+                    routed_output = routed_output.masked_scatter(
+                        mask.unsqueeze(-1),
+                        routed_output[mask] + exp_out * exp_weights[mask]
+                    )
 
-        final_output = shared_output + routed_output
+        final_output = shared_output + routed_output * self.routed_scaling_factor
         return final_output.view(batch_size, seq_len, hidden_dim)
 
 
